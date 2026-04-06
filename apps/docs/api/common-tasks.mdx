@@ -70,24 +70,6 @@ const updated = await notra.content.updatePost({
 console.log(updated.post);
 ```
 
-```rust Rust
-use notra::Notra;
-use notra::models::PostStatus;
-
-let notra = Notra::builder()
-    .bearer_auth(std::env::var("NOTRA_API_KEY").unwrap())
-    .build()?;
-
-let updated = notra.content()
-    .update_post("post_abc")
-    .title("Ship notes for week 11")
-    .markdown("# Ship notes\n\nWe shipped a faster editor.")
-    .status(PostStatus::Published)
-    .send()
-    .await?;
-
-println!("{:?}", updated.post);
-```
 </CodeGroup>
 
 ## Create a new post

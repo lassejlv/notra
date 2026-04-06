@@ -35,20 +35,6 @@ const result = await notra.content.listPosts();
 console.log(result);
 ```
 
-```rust Rust
-use notra::Notra;
-
-let notra = Notra::builder()
-    .bearer_auth(std::env::var("NOTRA_BEARER_AUTH").unwrap())
-    .build()?;
-
-let result = notra.content()
-    .list_posts()
-    .send()
-    .await?;
-
-println!("{:?}", result);
-```
 </CodeGroup>
 
 | Name | Type | Scheme | Environment Variable |
@@ -110,22 +96,6 @@ try {
 }
 ```
 
-```rust Rust
-use notra::{Notra, NotraError};
-
-let notra = Notra::builder()
-    .bearer_auth(std::env::var("NOTRA_BEARER_AUTH").unwrap())
-    .build()?;
-
-match notra.content().list_posts().send().await {
-    Ok(result) => println!("{:?}", result),
-    Err(NotraError::Api { status, message }) => {
-        eprintln!("API error ({}): {}", status, message);
-    }
-    Err(NotraError::Http(e)) => eprintln!("Network error: {e}"),
-    Err(NotraError::Builder(msg)) => eprintln!("Config error: {msg}"),
-}
-```
 </CodeGroup>
 
 ## Security Best Practices
