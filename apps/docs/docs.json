@@ -95,6 +95,7 @@
           "api/common-tasks",
           "api/pagination",
           "api/types",
+          "api/rust-sdk",
           {
             "group": "Routes",
             "expanded": true,
