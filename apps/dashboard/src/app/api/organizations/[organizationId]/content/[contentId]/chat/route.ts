@@ -1,4 +1,5 @@
 import { orchestrateChat } from "@notra/ai/orchestration/orchestrate";
+import type { CheckResponse } from "autumn-js";
 import { nanoid } from "nanoid";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
@@ -6,11 +7,19 @@ import { FEATURES } from "@/constants/features";
 import { withOrganizationAuth } from "@/lib/auth/organization";
 import { autumn } from "@/lib/billing/autumn";
 import {
+  calculateTokenCostCents,
+  shouldApplyMarkup,
+} from "@/lib/billing/token-pricing";
+import { useLogger, withEvlog } from "@/lib/evlog";
+import {
   getGitHubIntegrationById,
   getGitHubToolRepositoryContextByIntegrationId,
 } from "@/lib/services/github-integration";
+import {
+  getLinearIntegrationById,
+  getLinearToolContextByIntegrationId,
+} from "@/lib/services/linear-integration";
 import { chatRequestSchema } from "@/schemas/content";
-import type { AutumnCheckResponse } from "@/types/autumn";
 
 interface RouteContext {
   params: Promise<{ organizationId: string; contentId: string }>;
@@ -18,11 +27,22 @@ interface RouteContext {
 
 export const maxDuration = 60;
 
-export async function POST(request: NextRequest, { params }: RouteContext) {
+export const POST = withEvlog(async function POST(
+  request: NextRequest,
+  { params }: RouteContext
+) {
   const requestId = nanoid(10);
+  const log = useLogger();
 
   try {
-    const { organizationId } = await params;
+    const { organizationId, contentId } = await params;
+
+    log.set({
+      feature: "content_chat",
+      organizationId,
+      contentId,
+      requestId,
+    });
 
     const auth = await withOrganizationAuth(request, organizationId);
 
@@ -31,6 +51,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     }
 
     // Check billing if Autumn is configured
+    let useMarkup = false;
     if (autumn) {
       console.log("[Autumn] Checking feature access:", {
         requestId,
@@ -38,7 +59,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
         featureId: FEATURES.AI_CREDITS,
       });
 
-      let checkData: AutumnCheckResponse | null = null;
+      let checkData: CheckResponse | null = null;
       try {
         checkData = await autumn.check({
           customerId: organizationId,
@@ -71,6 +92,8 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
           { status: 403 }
         );
       }
+
+      useMarkup = shouldApplyMarkup(checkData?.balance ?? null);
     } else {
       console.log(
         "[Autumn] Skipping billing check - AUTUMN_SECRET_KEY not configured",
@@ -91,79 +114,88 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     const { messages, currentMarkdown, contentType, selection, context } =
       parseResult.data;
 
-    let tracked = false;
-    if (autumn) {
-      try {
-        await autumn.track({
-          customerId: organizationId,
-          featureId: FEATURES.AI_CREDITS,
-          value: 1,
-        });
-        tracked = true;
-      } catch (trackError) {
-        console.error("[Autumn] Track error:", {
-          requestId,
-          customerId: organizationId,
-          error: trackError,
-        });
-      }
-    }
+    const autumnClient = autumn;
 
-    try {
-      const { stream, routingDecision } = await orchestrateChat(
-        {
-          organizationId,
-          messages,
-          currentMarkdown,
-          contentType,
-          selection,
-          context,
-          maxSteps: 5,
+    const { stream, routingDecision } = await orchestrateChat(
+      {
+        organizationId,
+        messages,
+        currentMarkdown,
+        contentType,
+        selection,
+        context,
+        maxSteps: 5,
+        log,
+      },
+      {
+        integrationFetchers: {
+          getGitHubIntegrationById,
+          getLinearIntegrationById,
         },
-        {
-          getIntegrationById: getGitHubIntegrationById,
-          resolveContext: getGitHubToolRepositoryContextByIntegrationId,
-        }
-      );
-
-      console.log("[Content Chat] Routing decision:", {
-        requestId,
-        decision: routingDecision,
-      });
-
-      return stream.toUIMessageStreamResponse({
-        onError: (error) => {
-          console.error("[Content Chat] Stream error:", { requestId, error });
-          if (error instanceof Error) {
-            return error.message;
+        resolveContext: getGitHubToolRepositoryContextByIntegrationId,
+        resolveLinearContext: getLinearToolContextByIntegrationId,
+        onUsage(usage, modelId) {
+          if (!autumnClient) {
+            return;
           }
-          return "An error occurred while processing your request.";
-        },
-      });
-    } catch (orchestrationError) {
-      if (tracked && autumn) {
-        try {
-          await autumn.track({
-            customerId: organizationId,
-            featureId: FEATURES.AI_CREDITS,
-            value: 0,
-          });
-          console.log(
-            "[Autumn] Usage compensated after orchestration failure:",
+
+          const costCents = calculateTokenCostCents(
             {
-              requestId,
-            }
+              inputTokens: usage.inputTokens ?? 0,
+              outputTokens: usage.outputTokens ?? 0,
+              totalTokens: usage.totalTokens ?? 0,
+              cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
+              cacheWriteTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+            },
+            modelId,
+            useMarkup
           );
-        } catch (refundError) {
-          console.error("[Autumn] Failed to compensate usage:", {
-            requestId,
-            customerId: organizationId,
-            error: refundError,
-          });
-        }
+
+          autumnClient
+            .track({
+              customerId: organizationId,
+              featureId: FEATURES.AI_CREDITS,
+              value: costCents,
+              properties: {
+                source: "chat",
+                content_id: contentId,
+                model: modelId,
+                input_tokens: usage.inputTokens ?? 0,
+                output_tokens: usage.outputTokens ?? 0,
+                cache_read_tokens:
+                  usage.inputTokenDetails?.cacheReadTokens ?? 0,
+                cache_write_tokens:
+                  usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+                total_tokens: usage.totalTokens ?? 0,
+                cost_cents: costCents,
+              },
+            })
+            .catch((trackError) => {
+              console.error("[Autumn] Track error after chat completion:", {
+                requestId,
+                customerId: organizationId,
+                error: trackError,
+              });
+            });
+        },
+        log,
       }
-      throw orchestrationError;
-    }
+    );
+
+    console.log("[Content Chat] Routing decision:", {
+      requestId,
+      decision: routingDecision,
+    });
+
+    return stream.toUIMessageStreamResponse({
+      onError: (error) => {
+        console.error("[Content Chat] Stream error:", { requestId, error });
+        if (error instanceof Error) {
+          return error.message;
+        }
+        return "An error occurred while processing your request.";
+      },
+    });
   } catch (e) {
     console.error("[Content Chat] Error:", {
       requestId,
@@ -174,4 +206,4 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       { status: 500 }
     );
   }
-}
+});

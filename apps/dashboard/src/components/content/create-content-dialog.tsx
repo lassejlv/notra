@@ -105,8 +105,11 @@ const EVENT_ICON: Record<EventType, typeof GitPullRequestIcon> = {
   PR: GitPullRequestIcon,
   Commit: GitCommitIcon,
   Release: Rocket01Icon,
+  LinearIssue: Tick01Icon,
 };
 
+import { Github } from "@notra/ui/components/ui/svgs/github";
+import { Linear } from "@notra/ui/components/ui/svgs/linear";
 import { AddIntegrationDialog } from "@/components/integrations/add-integration-dialog";
 import { AddRepositoryButton } from "@/components/integrations/add-repository-button";
 import { AddRepositoryDialog } from "@/components/integrations/add-repository-dialog";
@@ -137,6 +140,9 @@ export function CreateContentDialog({
   const [selectedReleaseKeys, setSelectedReleaseKeys] = useState<Set<string>>(
     new Set()
   );
+  const [selectedLinearKeys, setSelectedLinearKeys] = useState<Set<string>>(
+    new Set()
+  );
   const lastInitializedParamsRef = useRef("");
   const previewWarningKeyRef = useRef<string>("");
   const selectionsTouchedRef = useRef(false);
@@ -150,6 +156,7 @@ export function CreateContentDialog({
       contentType: DEFAULT_CONTENT_TYPE,
       lookbackWindow: "last_7_days" as LookbackWindow,
       repositoryIds: [] as string[],
+      linearIntegrationIds: [] as string[],
       brandVoiceId: "" as string,
       dataPoints: DEFAULT_DATA_POINTS,
     },
@@ -171,38 +178,79 @@ export function CreateContentDialog({
     })
   );
 
-  const { repositories, repositoryOptions, githubIntegrationId } =
-    useMemo(() => {
-      const githubIntegrations =
-        integrationsResponse?.integrations.filter((i) => i.type === "github") ??
-        [];
-      const repos = githubIntegrations.flatMap((i) => i.repositories);
-      return {
-        repositories: repos,
-        repositoryOptions: repos.map((r) => ({
-          value: r.id,
-          label: r.defaultBranch
-            ? `${r.owner}/${r.repo} · ${r.defaultBranch}`
-            : `${r.owner}/${r.repo}`,
-        })),
-        githubIntegrationId: githubIntegrations[0]?.id,
-      };
-    }, [integrationsResponse]);
+  const {
+    repositories,
+    integrationOptions,
+    githubIntegrationId,
+    hasLinearIntegrations,
+  } = useMemo(() => {
+    const githubIntegrations =
+      integrationsResponse?.integrations.filter(
+        (i) => i.type === "github" && i.enabled
+      ) ?? [];
+    const linearIntegrationsList =
+      integrationsResponse?.integrations.filter(
+        (i) => i.type === "linear" && i.enabled
+      ) ?? [];
+    const repos = githubIntegrations.flatMap((i) =>
+      i.repositories.filter((r) => r.enabled)
+    );
+
+    const options: Array<{
+      value: string;
+      label: string;
+      type: "github" | "linear";
+    }> = [
+      ...repos.map((r) => ({
+        value: r.id,
+        label: r.defaultBranch
+          ? `${r.owner}/${r.repo} · ${r.defaultBranch}`
+          : `${r.owner}/${r.repo}`,
+        type: "github" as const,
+      })),
+      ...linearIntegrationsList.map((i) => ({
+        value: `linear:${i.id}`,
+        label: i.displayName,
+        type: "linear" as const,
+      })),
+    ];
+
+    return {
+      repositories: repos,
+      integrationOptions: options,
+      githubIntegrationId: githubIntegrations[0]?.id,
+      hasLinearIntegrations: linearIntegrationsList.length > 0,
+    };
+  }, [integrationsResponse]);
 
   const repositoryIds = useStore(form.store, (s) => s.values.repositoryIds);
   const lookbackWindow = useStore(form.store, (s) => s.values.lookbackWindow);
   const dataPoints = useStore(form.store, (s) => s.values.dataPoints);
 
+  const githubRepoIds = useMemo(
+    () => repositoryIds.filter((id) => !id.startsWith("linear:")),
+    [repositoryIds]
+  );
+
+  const selectedLinearIds = useMemo(
+    () =>
+      repositoryIds
+        .filter((id) => id.startsWith("linear:"))
+        .map((id) => id.replace("linear:", "")),
+    [repositoryIds]
+  );
+
   const previewParamsKey = useMemo(
     () =>
       JSON.stringify({
-        repositoryIds,
+        repositoryIds: githubRepoIds,
+        linearIntegrationIds: selectedLinearIds,
         lookbackWindow,
         includeCommits: dataPoints.includeCommits,
         includePullRequests: dataPoints.includePullRequests,
         includeReleases: dataPoints.includeReleases,
       }),
-    [repositoryIds, lookbackWindow, dataPoints]
+    [githubRepoIds, selectedLinearIds, lookbackWindow, dataPoints]
   );
 
   const {
@@ -213,14 +261,19 @@ export function CreateContentDialog({
     ...dashboardOrpc.content.preview.queryOptions({
       input: {
         organizationId,
-        repositoryIds,
+        repositoryIds: githubRepoIds,
         lookbackWindow,
         includeCommits: dataPoints.includeCommits,
         includePullRequests: dataPoints.includePullRequests,
         includeReleases: dataPoints.includeReleases,
+        linearIntegrationIds:
+          selectedLinearIds.length > 0 ? selectedLinearIds : undefined,
       },
     }),
-    enabled: open && step === "review" && repositoryIds.length > 0,
+    enabled:
+      open &&
+      step === "review" &&
+      (githubRepoIds.length > 0 || selectedLinearIds.length > 0),
     staleTime: 60_000,
   });
 
@@ -240,7 +293,10 @@ export function CreateContentDialog({
   const previewFailures = previewResponse?.failures ?? [];
 
   useEffect(() => {
-    if (!previewData || lastInitializedParamsRef.current === previewParamsKey) {
+    if (
+      (!previewData && !previewResponse?.linearIntegrations) ||
+      lastInitializedParamsRef.current === previewParamsKey
+    ) {
       return;
     }
     lastInitializedParamsRef.current = previewParamsKey;
@@ -249,7 +305,8 @@ export function CreateContentDialog({
     const commitKeys = new Set<string>();
     const prKeys = new Set<string>();
     const relKeys = new Set<string>();
-    for (const repo of previewData) {
+    const linearKeys = new Set<string>();
+    for (const repo of previewData ?? []) {
       for (const commit of repo.commits) {
         commitKeys.add(commit.sha);
       }
@@ -270,9 +327,15 @@ export function CreateContentDialog({
         );
       }
     }
+    for (const li of previewResponse?.linearIntegrations ?? []) {
+      for (const issue of li.issues) {
+        linearKeys.add(`${li.integrationId}:${issue.id}`);
+      }
+    }
     setSelectedCommitKeys(commitKeys);
     setSelectedPrKeys(prKeys);
     setSelectedReleaseKeys(relKeys);
+    setSelectedLinearKeys(linearKeys);
   }, [previewData, previewParamsKey]);
 
   useEffect(() => {
@@ -302,6 +365,7 @@ export function CreateContentDialog({
       contentType: OnDemandContentType;
       lookbackWindow: LookbackWindow;
       repositoryIds: string[];
+      linearIntegrationIds?: string[];
       brandVoiceId?: string;
       dataPoints: ContentDataPointSettings;
       selectedItems?: SelectedItems;
@@ -348,6 +412,7 @@ export function CreateContentDialog({
         setSelectedCommitKeys(new Set());
         setSelectedPrKeys(new Set());
         setSelectedReleaseKeys(new Set());
+        setSelectedLinearKeys(new Set());
         lastInitializedParamsRef.current = "";
         selectionsTouchedRef.current = false;
       }
@@ -366,43 +431,83 @@ export function CreateContentDialog({
 
   const handleCreate = useCallback(() => {
     const value = form.state.values;
-    const selectedItems: SelectedItems | undefined =
-      selectionsTouchedRef.current
+    const githubRepoIds = value.repositoryIds.filter(
+      (id) => !id.startsWith("linear:")
+    );
+    const hasLinear = value.repositoryIds.some((id) =>
+      id.startsWith("linear:")
+    );
+
+    const selectedLinearIssues = Array.from(selectedLinearKeys).map((key) => {
+      const separatorIdx = key.indexOf(":");
+      return {
+        integrationId: key.slice(0, separatorIdx),
+        issueId: key.slice(separatorIdx + 1),
+      };
+    });
+
+    const commitShas =
+      selectionsTouchedRef.current && value.dataPoints.includeCommits
+        ? Array.from(selectedCommitKeys)
+        : undefined;
+    const pullRequestNumbers =
+      selectionsTouchedRef.current && value.dataPoints.includePullRequests
+        ? Array.from(selectedPrKeys)
+            .map((key) => prSelectionFromKey(key))
+            .filter((selection): selection is PrSelection => selection !== null)
+        : undefined;
+    const releaseTagNames =
+      selectionsTouchedRef.current && value.dataPoints.includeReleases
+        ? Array.from(selectedReleaseKeys)
+            .map((key) => releaseSelectionFromKey(key))
+            .filter(
+              (selection): selection is ReleaseSelection => selection !== null
+            )
+        : undefined;
+    const linearIssueIds =
+      selectionsTouchedRef.current &&
+      hasLinear &&
+      selectedLinearIssues.length > 0
+        ? selectedLinearIssues
+        : undefined;
+
+    const selectedItems: SelectedItems =
+      commitShas?.length ||
+      pullRequestNumbers?.length ||
+      releaseTagNames?.length ||
+      linearIssueIds?.length
         ? {
-            commitShas: value.dataPoints.includeCommits
-              ? Array.from(selectedCommitKeys)
-              : [],
-            pullRequestNumbers: value.dataPoints.includePullRequests
-              ? Array.from(selectedPrKeys)
-                  .map((key) => prSelectionFromKey(key))
-                  .filter(
-                    (selection): selection is PrSelection => selection !== null
-                  )
-              : [],
-            releaseTagNames: value.dataPoints.includeReleases
-              ? Array.from(selectedReleaseKeys)
-                  .map((key) => releaseSelectionFromKey(key))
-                  .filter(
-                    (selection): selection is ReleaseSelection =>
-                      selection !== null
-                  )
-              : [],
+            commitShas,
+            pullRequestNumbers,
+            releaseTagNames,
+            linearIssueIds,
           }
         : undefined;
+
     mutation.mutate({
       ...value,
+      repositoryIds: githubRepoIds,
+      linearIntegrationIds: hasLinear ? selectedLinearIds : undefined,
+      dataPoints: {
+        ...value.dataPoints,
+        includeLinearData: hasLinear,
+      },
       brandVoiceId: value.brandVoiceId || undefined,
       selectedItems,
     });
-  }, [form, mutation, selectedCommitKeys, selectedPrKeys, selectedReleaseKeys]);
+  }, [
+    form,
+    mutation,
+    selectedCommitKeys,
+    selectedPrKeys,
+    selectedReleaseKeys,
+    selectedLinearKeys,
+  ]);
 
   const eventCounts = useMemo(() => {
-    if (!previewData) {
-      return { total: 0, selected: 0 };
-    }
     let total = 0;
     let selected = 0;
-    for (const repo of previewData) {
+    for (const repo of previewData ?? []) {
       if (dataPoints.includeCommits) {
         total += repo.commits.length;
         for (const commit of repo.commits) {
@@ -442,13 +547,23 @@ export function CreateContentDialog({
         }
       }
     }
+    for (const li of previewResponse?.linearIntegrations ?? []) {
+      total += li.issues.length;
+      for (const issue of li.issues) {
+        if (selectedLinearKeys.has(`${li.integrationId}:${issue.id}`)) {
+          selected++;
+        }
+      }
+    }
     return { total, selected };
   }, [
     previewData,
+    previewResponse?.linearIntegrations,
     dataPoints,
     selectedCommitKeys,
     selectedPrKeys,
     selectedReleaseKeys,
+    selectedLinearKeys,
   ]);
 
   const { paginatedRepos, totalPages } = useMemo(() => {
@@ -547,20 +662,19 @@ export function CreateContentDialog({
   }, [previewData, dataPoints, currentPage]);
 
   const handleToggleAll = useCallback(() => {
-    if (!previewData) {
-      return;
-    }
     selectionsTouchedRef.current = true;
     const allSelected = eventCounts.selected === eventCounts.total;
     if (allSelected) {
       setSelectedCommitKeys(new Set());
       setSelectedPrKeys(new Set());
       setSelectedReleaseKeys(new Set());
+      setSelectedLinearKeys(new Set());
     } else {
       const commitKeys = new Set<string>();
       const prKeys = new Set<string>();
       const relKeys = new Set<string>();
-      for (const repo of previewData) {
+      const linearKeys = new Set<string>();
+      for (const repo of previewData ?? []) {
         if (dataPoints.includeCommits) {
           for (const c of repo.commits) {
             commitKeys.add(c.sha);
@@ -587,11 +701,22 @@ export function CreateContentDialog({
           }
         }
       }
+      for (const li of previewResponse?.linearIntegrations ?? []) {
+        for (const issue of li.issues) {
+          linearKeys.add(`${li.integrationId}:${issue.id}`);
+        }
+      }
       setSelectedCommitKeys(commitKeys);
       setSelectedPrKeys(prKeys);
       setSelectedReleaseKeys(relKeys);
+      setSelectedLinearKeys(linearKeys);
     }
-  }, [previewData, dataPoints, eventCounts]);
+  }, [
+    previewData,
+    previewResponse?.linearIntegrations,
+    dataPoints,
+    eventCounts,
+  ]);
 
   const hasSelectableEvents =
     dataPoints.includeCommits ||
@@ -764,22 +889,22 @@ export function CreateContentDialog({
                   <form.Field name="repositoryIds">
                     {(field) => (
                       <div className="space-y-2">
-                        <Label htmlFor={field.name}>Repositories</Label>
+                        <Label htmlFor={field.name}>Integrations</Label>
                         {isLoadingRepos && <Skeleton className="h-10 w-full" />}
-                        {!isLoadingRepos && repositories.length === 0 && (
+                        {!isLoadingRepos && integrationOptions.length === 0 && (
                           <div className="flex items-center gap-2 rounded-md border border-dashed p-3">
                             <span className="flex-1 text-muted-foreground text-xs">
-                              No repositories connected.
+                              No integrations connected.
                             </span>
                             <AddRepositoryButton
                               onAdd={handleOpenAddRepositoryFlow}
                             />
                           </div>
                         )}
-                        {!isLoadingRepos && repositories.length > 0 && (
+                        {!isLoadingRepos && integrationOptions.length > 0 && (
                           <div ref={comboboxAnchor}>
                             <Combobox
-                              items={repositoryOptions.map((r) => r.value)}
+                              items={integrationOptions.map((o) => o.value)}
                               multiple
                               onValueChange={(v) =>
                                 field.handleChange(Array.isArray(v) ? v : [])
@@ -788,28 +913,45 @@ export function CreateContentDialog({
                             >
                               <ComboboxChips>
                                 {field.state.value.map((id) => {
-                                  const r = repositoryOptions.find(
+                                  const opt = integrationOptions.find(
                                     (o) => o.value === id
                                   );
-                                  if (!r) {
+                                  if (!opt) {
                                     return null;
                                   }
                                   return (
-                                    <ComboboxChip key={r.value}>
-                                      {r.label}
+                                    <ComboboxChip key={opt.value}>
+                                      <span className="flex items-center gap-1.5">
+                                        {opt.type === "github" ? (
+                                          <Github className="size-3 shrink-0" />
+                                        ) : (
+                                          <Linear className="size-3 shrink-0" />
+                                        )}
+                                        {opt.label}
+                                      </span>
                                     </ComboboxChip>
                                   );
                                 })}
-                                <ComboboxChipsInput placeholder="Search repositories" />
+                                <ComboboxChipsInput placeholder="Search integrations" />
                               </ComboboxChips>
                               <ComboboxContent anchor={comboboxAnchor.current}>
                                 <ComboboxEmpty>
-                                  No repositories found.
+                                  No integrations found.
                                 </ComboboxEmpty>
                                 <ComboboxList>
-                                  {repositoryOptions.map((r) => (
-                                    <ComboboxItem key={r.value} value={r.value}>
-                                      {r.label}
+                                  {integrationOptions.map((opt) => (
+                                    <ComboboxItem
+                                      key={opt.value}
+                                      value={opt.value}
+                                    >
+                                      <span className="flex items-center gap-2">
+                                        {opt.type === "github" ? (
+                                          <Github className="size-3.5 shrink-0" />
+                                        ) : (
+                                          <Linear className="size-3.5 shrink-0" />
+                                        )}
+                                        {opt.label}
+                                      </span>
                                     </ComboboxItem>
                                   ))}
                                 </ComboboxList>
@@ -818,7 +960,7 @@ export function CreateContentDialog({
                           </div>
                         )}
                         <p className="text-muted-foreground text-xs">
-                          Pick one or more repositories.
+                          Pick one or more integrations to pull data from.
                         </p>
                       </div>
                     )}
@@ -940,7 +1082,7 @@ export function CreateContentDialog({
                       </div>
                     </div>
                   )}
-                {!isLoadingPreview && !isPreviewError && previewData && (
+                {!isLoadingPreview && !isPreviewError && previewResponse && (
                   <>
                     {eventCounts.total > 0 && (
                       <div className="flex shrink-0 items-center justify-between border-b px-4 py-2">
@@ -1015,6 +1157,48 @@ export function CreateContentDialog({
                             />
                           ))
                         )}
+                        {previewResponse?.linearIntegrations?.map(
+                          (li) =>
+                            li.issues.length > 0 && (
+                              <div
+                                className="overflow-hidden rounded-lg border"
+                                key={li.integrationId}
+                              >
+                                <div className="flex items-center gap-2 bg-muted/30 px-3 py-2">
+                                  <Linear className="size-4 shrink-0" />
+                                  <span className="font-medium text-sm">
+                                    {li.displayName}
+                                  </span>
+                                </div>
+                                <div className="divide-y">
+                                  {li.issues.map((issue) => {
+                                    const key = `${li.integrationId}:${issue.id}`;
+                                    return (
+                                      <EventRow
+                                        key={issue.id}
+                                        label={`${issue.identifier} ${issue.title}`}
+                                        meta={`${issue.assignee ?? "Unassigned"} · ${issue.completedAt ? formatEventDate(issue.completedAt) : ""}`}
+                                        onToggle={() => {
+                                          selectionsTouchedRef.current = true;
+                                          setSelectedLinearKeys((prev) => {
+                                            const next = new Set(prev);
+                                            if (next.has(key)) {
+                                              next.delete(key);
+                                            } else {
+                                              next.add(key);
+                                            }
+                                            return next;
+                                          });
+                                        }}
+                                        selected={selectedLinearKeys.has(key)}
+                                        type="LinearIssue"
+                                      />
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )
+                        )}
                         {totalPages > 1 && (
                           <Pagination>
                             <PaginationContent>
@@ -1079,9 +1263,7 @@ export function CreateContentDialog({
               {step === "configure" && (
                 <div className="flex items-center justify-end">
                   <Button
-                    disabled={
-                      repositoryIds.length === 0 || !hasAnyGitHubDataPointActive
-                    }
+                    disabled={repositoryIds.length === 0}
                     onClick={handleContinue}
                     type="button"
                   >
@@ -1103,9 +1285,7 @@ export function CreateContentDialog({
                     disabled={
                       mutation.isPending ||
                       isLoadingPreview ||
-                      (hasSelectableEvents &&
-                        eventCounts.total > 0 &&
-                        eventCounts.selected === 0)
+                      eventCounts.selected === 0
                     }
                     onClick={handleCreate}
                     type="button"
@@ -1206,7 +1386,8 @@ function RepoSection({
 
   return (
     <div className="overflow-hidden rounded-lg border">
-      <div className="bg-muted/30 px-3 py-2">
+      <div className="flex items-center gap-2 bg-muted/30 px-3 py-2">
+        <Github className="size-4 shrink-0" />
         <span className="font-medium text-sm">
           {repo.owner}/{repo.repo}
         </span>
@@ -1300,7 +1481,7 @@ function EventRow({
       </div>
       <Badge className={cn("shrink-0", EVENT_BADGE[type])}>
         <HugeiconsIcon className="size-3!" icon={EVENT_ICON[type]} />
-        {type}
+        {type === "LinearIssue" ? "Issue" : type}
       </Badge>
     </button>
   );

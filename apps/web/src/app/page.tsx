@@ -92,6 +92,7 @@ export default function LandingPage() {
                 alt="Notra product demo"
                 className="h-full w-full object-cover dark:hidden"
                 height={1080}
+                priority
                 src="/demo.webp"
                 width={1920}
               />
@@ -99,6 +100,7 @@ export default function LandingPage() {
                 alt="Notra product demo"
                 className="hidden h-full w-full object-cover dark:block"
                 height={1080}
+                priority
                 src="/demo-dark.webp"
                 width={1920}
               />
@@ -286,7 +288,7 @@ export default function LandingPage() {
                 </h2>
 
                 <div className="self-stretch text-center font-normal font-sans text-base text-muted-foreground leading-7">
-                  Start generating content for free. Upgrade when you
+                  Start with a 3-day free trial. Upgrade when you
                   <br />
                   need more integrations, posts, or team seats.
                 </div>

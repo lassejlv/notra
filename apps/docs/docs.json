@@ -77,6 +77,7 @@
             "group": "Integrations",
             "pages": [
               "integrations/github",
+              "integrations/linear",
               "integrations/framer",
               "integrations/featul",
               "integrations/kontentspace"
@@ -98,7 +99,7 @@
             "group": "Routes",
             "expanded": true,
             "openapi": {
-              "source": "openapi.json",
+              "source": "https://api.usenotra.com/openapi.json",
               "directory": "api-reference"
             },
             "pages": [

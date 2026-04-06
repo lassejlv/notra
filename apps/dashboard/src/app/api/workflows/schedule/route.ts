@@ -6,6 +6,7 @@ import {
   contentTriggerLookbackWindows,
   contentTriggers,
   githubIntegrations,
+  linearIntegrations,
   members,
   organizationNotificationSettings,
   organizations,
@@ -14,10 +15,16 @@ import { getResend } from "@notra/email/utils/resend";
 import type { WorkflowContext } from "@upstash/workflow";
 import { WorkflowAbort } from "@upstash/workflow";
 import { serve } from "@upstash/workflow/nextjs";
+import type { CheckResponse } from "autumn-js";
 import { and, eq, inArray } from "drizzle-orm";
+import { createRequestLogger } from "evlog";
 import { FEATURES } from "@/constants/features";
 import { GITHUB_RATE_LIMIT_RETRY_DELAY } from "@/constants/workflows";
 import { autumn } from "@/lib/billing/autumn";
+import {
+  calculateTokenCostCents,
+  shouldApplyMarkup,
+} from "@/lib/billing/token-pricing";
 import {
   trackScheduledContentCreated,
   trackScheduledContentFailed,
@@ -32,8 +39,10 @@ import {
   generateRunId,
 } from "@/lib/generations/tracking";
 import { getGitHubToolRepositoryContextByIntegrationId } from "@/lib/services/github-integration";
+import { getLinearToolContextByIntegrationId } from "@/lib/services/linear-integration";
 import { getBaseUrl, triggerScheduleNow } from "@/lib/triggers/qstash";
 import { appendWebhookLog } from "@/lib/webhooks/logging";
+import { buildDataPointRestrictionInstructions } from "@/lib/workflows/on-demand/helpers";
 import { generateScheduledContent } from "@/lib/workflows/schedule/handlers";
 import type { ContentGenerationResult } from "@/lib/workflows/schedule/types";
 import {
@@ -50,7 +59,6 @@ import {
   type ScheduleWorkflowPayload,
   scheduleWorkflowPayloadSchema,
 } from "@/schemas/workflows";
-import type { AutumnCheckResponse } from "@/types/autumn";
 
 interface TriggerData {
   id: string;
@@ -177,9 +185,31 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
       }
     );
 
-    if (repositories.length === 0) {
+    const linearIntegrationRefs = await context.run<
+      Array<{ integrationId: string; teamName?: string }>
+    >("fetch-linear-integrations", async () => {
+      const integrations = await db
+        .select({
+          id: linearIntegrations.id,
+          linearTeamName: linearIntegrations.linearTeamName,
+        })
+        .from(linearIntegrations)
+        .where(
+          and(
+            eq(linearIntegrations.organizationId, trigger.organizationId),
+            eq(linearIntegrations.enabled, true)
+          )
+        );
+
+      return integrations.map((i) => ({
+        integrationId: i.id,
+        teamName: i.linearTeamName ?? undefined,
+      }));
+    });
+
+    if (repositories.length === 0 && linearIntegrationRefs.length === 0) {
       console.log(
-        `[Schedule] No valid repositories for trigger ${triggerId}, canceling`
+        `[Schedule] No valid data sources for trigger ${triggerId}, canceling`
       );
       await context.cancel();
       return;
@@ -230,18 +260,18 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
     const aiCreditReservation = await context.run<{
       canceled: boolean;
       reserved: boolean;
+      useMarkup: boolean;
     }>("reserve-ai-credit", async () => {
       if (!autumn) {
-        return { canceled: false, reserved: false };
+        return { canceled: false, reserved: false, useMarkup: false };
       }
 
-      let data: AutumnCheckResponse | null = null;
+      let data: CheckResponse | null = null;
       try {
         data = await autumn.check({
           customerId: trigger.organizationId,
           featureId: FEATURES.AI_CREDITS,
           requiredBalance: 1,
-          sendEvent: true,
         });
       } catch (error) {
         throw new Error(`Autumn check failed: ${String(error)}`);
@@ -255,10 +285,12 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
           }
         );
         await context.cancel();
-        return { canceled: true, reserved: false };
+        return { canceled: true, reserved: false, useMarkup: false };
       }
 
-      return { canceled: false, reserved: true };
+      const useMarkup = shouldApplyMarkup(data?.balance ?? null);
+
+      return { canceled: false, reserved: true, useMarkup };
     });
 
     if (aiCreditReservation.canceled) {
@@ -286,9 +318,32 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
         async () => {
           const lookbackRange = resolveLookbackRange(lookbackWindow);
           const todayUtc = formatUtcTodayContext(lookbackRange.end);
-          const repoList = repositories
-            .map((r) => `integrationId: ${r.id}`)
-            .join(", ");
+
+          const hasLinear = linearIntegrationRefs.length > 0;
+          const dataPointSettings = {
+            includePullRequests: true,
+            includeCommits: true,
+            includeReleases: true,
+            includeLinearData: hasLinear,
+          };
+
+          const sourceTargetParts = repositories.map(
+            (r) => `${r.owner}/${r.repo} (integrationId: ${r.id})`
+          );
+          for (const ref of linearIntegrationRefs) {
+            sourceTargetParts.push(
+              `Linear${ref.teamName ? ` / ${ref.teamName}` : ""} (integrationId: ${ref.integrationId})`
+            );
+          }
+
+          const restrictionInstructions =
+            buildDataPointRestrictionInstructions(dataPointSettings);
+          const customInstructions = [
+            brand?.customInstructions?.trim() ?? "",
+            restrictionInstructions ?? "",
+          ]
+            .filter((v) => v.length > 0)
+            .join("\n\n");
 
           const sourceMetadata: PostSourceMetadata = {
             triggerId: trigger.id,
@@ -307,7 +362,7 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
           };
 
           const promptInput = {
-            sourceTargets: repoList,
+            sourceTargets: sourceTargetParts.join(", "),
             todayUtc,
             lookbackLabel: lookbackRange.label,
             lookbackStartIso: lookbackRange.start.toISOString(),
@@ -315,7 +370,7 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
             companyName: brand?.companyName ?? undefined,
             companyDescription: brand?.companyDescription ?? undefined,
             audience: brand?.audience ?? undefined,
-            customInstructions: brand?.customInstructions ?? null,
+            customInstructions: customInstructions || null,
             language: brand?.language ?? undefined,
           };
 
@@ -331,20 +386,41 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
             "Conversational"
           );
 
-          return generateScheduledContent(trigger.outputType, {
-            organizationId: trigger.organizationId,
-            repositories: repositoryParams,
-            tone,
-            promptInput,
-            sourceMetadata,
-            commitWindow: {
-              since: lookbackRange.start.toISOString(),
-              until: lookbackRange.end.toISOString(),
-            },
-            voiceId: brand?.id,
-            autoPublish: trigger.autoPublish,
-            resolveContext: getGitHubToolRepositoryContextByIntegrationId,
+          const log = createRequestLogger({
+            method: "POST",
+            path: "/api/workflows/schedule",
           });
+
+          log.set({
+            feature: "scheduled_content_generation",
+            organizationId: trigger.organizationId,
+            triggerId,
+            outputType: trigger.outputType,
+            manual,
+          });
+
+          try {
+            return await generateScheduledContent(trigger.outputType, {
+              organizationId: trigger.organizationId,
+              repositories: repositoryParams,
+              linearIntegrations: linearIntegrationRefs,
+              tone,
+              promptInput,
+              sourceMetadata,
+              dataPointSettings,
+              commitWindow: {
+                since: lookbackRange.start.toISOString(),
+                until: lookbackRange.end.toISOString(),
+              },
+              voiceId: brand?.id,
+              autoPublish: trigger.autoPublish,
+              resolveContext: getGitHubToolRepositoryContextByIntegrationId,
+              resolveLinearContext: getLinearToolContextByIntegrationId,
+              log,
+            });
+          } finally {
+            log.emit();
+          }
         }
       );
 
@@ -784,6 +860,51 @@ export const { POST } = serve<ScheduleWorkflowPayload>(
               })
             )
           );
+        });
+      }
+
+      const autumnClientSuccess = autumn;
+      if (
+        aiCreditReservation.reserved &&
+        autumnClientSuccess &&
+        contentResult.usage
+      ) {
+        await context.run("track-ai-credit-usage", async () => {
+          const costCents = calculateTokenCostCents(
+            contentResult.usage!,
+            "anthropic/claude-haiku-4.5",
+            aiCreditReservation.useMarkup
+          );
+          await autumnClientSuccess.track({
+            customerId: trigger.organizationId,
+            featureId: FEATURES.AI_CREDITS,
+            value: costCents,
+            properties: {
+              source: "workflow_schedule",
+              output_type: trigger.outputType,
+              trigger_name: trigger.name,
+              input_tokens: contentResult.usage!.inputTokens,
+              output_tokens: contentResult.usage!.outputTokens,
+              cache_read_tokens: contentResult.usage!.cacheReadTokens,
+              cache_write_tokens: contentResult.usage!.cacheWriteTokens,
+              total_tokens: contentResult.usage!.totalTokens,
+              cost_cents: costCents,
+            },
+          });
+        });
+      } else if (aiCreditReservation.reserved && autumnClientSuccess) {
+        await context.run("track-ai-credit-fallback", async () => {
+          await autumnClientSuccess.track({
+            customerId: trigger.organizationId,
+            featureId: FEATURES.AI_CREDITS,
+            value: 1,
+            properties: {
+              source: "workflow_schedule",
+              output_type: trigger.outputType,
+              trigger_name: trigger.name,
+              fallback: true,
+            },
+          });
         });
       }
 

@@ -1,28 +1,40 @@
 import { createModel } from "@notra/ai/model";
+import type { AILogTarget } from "@notra/ai/observability";
 import { getContentEditorChatPrompt } from "@notra/ai/prompts/content-editor";
-import { getAISDKTelemetry } from "@notra/ai/telemetry";
-import type { ResolveIntegrationContext } from "@notra/ai/types/agents";
 import type {
+  ResolveIntegrationContext,
+  ResolveLinearIntegrationContext,
+} from "@notra/ai/types/agents";
+import type {
+  IntegrationFetchers,
   OrchestrateInput,
   OrchestrateResult,
 } from "@notra/ai/types/orchestration";
 import {
   convertToModelMessages,
+  type LanguageModelUsage,
   stepCountIs,
   streamText,
   type UIMessage,
 } from "ai";
 import {
-  type GetIntegrationById,
   hasEnabledGitHubIntegration,
+  hasEnabledLinearIntegration,
   validateIntegrations,
 } from "./integration-validator";
 import { routeAndSelectModel } from "./router";
-import { buildToolSet, getRepoContextFromIntegrations } from "./tool-registry";
+import {
+  buildToolSet,
+  getLinearContextFromIntegrations,
+  getRepoContextFromIntegrations,
+} from "./tool-registry";
 
 export interface OrchestrateDeps {
-  getIntegrationById?: GetIntegrationById;
+  integrationFetchers?: IntegrationFetchers;
   resolveContext?: ResolveIntegrationContext;
+  resolveLinearContext?: ResolveLinearIntegrationContext;
+  onUsage?: (usage: LanguageModelUsage, modelId: string) => void;
+  log?: AILogTarget;
 }
 
 export async function orchestrateChat(
@@ -37,18 +49,27 @@ export async function orchestrateChat(
     selection,
     context = [],
     maxSteps = 1,
+    log: inputLog,
   } = input;
+
+  const log = deps?.log ?? inputLog;
 
   const validatedIntegrations = await validateIntegrations(
     organizationId,
     context,
-    deps?.getIntegrationById
+    deps?.integrationFetchers
   );
 
   const hasGitHub = hasEnabledGitHubIntegration(validatedIntegrations);
+  const hasLinear = hasEnabledLinearIntegration(validatedIntegrations);
+  const hasDataSources = hasGitHub || hasLinear;
 
   const lastUserMessage = getLastUserMessage(messages);
-  const routingDecision = await routeAndSelectModel(lastUserMessage, hasGitHub);
+  const routingDecision = await routeAndSelectModel(
+    lastUserMessage,
+    hasDataSources,
+    log
+  );
 
   console.log("[Chat Routing]", {
     model: routingDecision.model,
@@ -56,9 +77,15 @@ export async function orchestrateChat(
     requiresTools: routingDecision.requiresTools,
     reasoning: routingDecision.reasoning,
     hasGitHub,
+    hasLinear,
   });
 
-  const modelWithMemory = createModel(organizationId, routingDecision.model);
+  const modelWithMemory = createModel(
+    organizationId,
+    routingDecision.model,
+    undefined,
+    log
+  );
 
   const { tools, descriptions } = buildToolSet(
     {
@@ -66,17 +93,23 @@ export async function orchestrateChat(
       currentMarkdown,
       validatedIntegrations,
     },
-    { resolveContext: deps?.resolveContext }
+    {
+      resolveContext: deps?.resolveContext,
+      resolveLinearContext: deps?.resolveLinearContext,
+    }
   );
 
   const repoContext = getRepoContextFromIntegrations(validatedIntegrations);
+  const linearContext = getLinearContextFromIntegrations(validatedIntegrations);
 
   const systemPrompt = getContentEditorChatPrompt({
     selection,
     contentType,
     repoContext,
+    linearContext,
     toolDescriptions: descriptions,
     hasGitHubEnabled: hasGitHub,
+    hasLinearEnabled: hasLinear,
   });
 
   const stream = streamText({
@@ -85,13 +118,9 @@ export async function orchestrateChat(
     messages: await convertToModelMessages(messages),
     tools,
     stopWhen: stepCountIs(maxSteps),
-    experimental_telemetry: await getAISDKTelemetry("orchestrateChat", {
-      organizationId,
-      metadata: {
-        agent: "chat",
-        feature: "content_editor",
-      },
-    }),
+    onFinish({ totalUsage }) {
+      deps?.onUsage?.(totalUsage, routingDecision.model);
+    },
     onError({ error }) {
       console.error("[Chat Stream Error]", {
         organizationId,

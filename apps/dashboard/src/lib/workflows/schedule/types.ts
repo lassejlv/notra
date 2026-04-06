@@ -1,7 +1,11 @@
 import type { ToneProfile } from "@notra/ai/schemas/tone";
 import type {
   AgentDataPointSettings,
+  AgentTokenUsage,
+  AILogTarget,
+  LinearIntegrationRef,
   ResolveIntegrationContext,
+  ResolveLinearIntegrationContext,
 } from "@notra/ai/types/agents";
 import type { GitHubSelectionFilters } from "@notra/ai/types/tools";
 import type { PostSourceMetadata } from "@notra/db/schema";
@@ -15,6 +19,7 @@ export interface ContentGenerationContext {
     repo: string;
     defaultBranch: string | null;
   }>;
+  linearIntegrations?: LinearIntegrationRef[];
   tone: ToneProfile;
   promptInput: {
     sourceTargets: string;
@@ -38,6 +43,8 @@ export interface ContentGenerationContext {
   voiceId?: string;
   autoPublish?: boolean;
   resolveContext: ResolveIntegrationContext;
+  resolveLinearContext?: ResolveLinearIntegrationContext;
+  log?: AILogTarget;
 }
 
 export type ContentGenerationResult =
@@ -46,6 +53,7 @@ export type ContentGenerationResult =
       postId: string;
       title: string;
       posts: PostSummary[];
+      usage?: AgentTokenUsage;
     }
   | { status: "rate_limited"; retryAfterSeconds?: number }
   | { status: "generation_failed"; reason: string }
