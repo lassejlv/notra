@@ -19,6 +19,24 @@ import type {
   The SDK ships with full type definitions — no need to maintain your own. The types below are only needed if you're calling the API with raw `fetch`.
 </Tip>
 
+## Using the Rust SDK
+
+The `notra` crate exports all types under `notra::models`. Import what you need:
+
+```rust
+use notra::models::{
+    Post, PostStatus, ContentType, Sort,
+    Pagination, Organization,
+    LookbackWindow, DataPoints, Repository,
+};
+```
+
+<Tip>
+  The Rust SDK ships with fully typed request builders and response structs — no
+  manual type definitions needed. See
+  [crates.io/crates/notra](https://crates.io/crates/notra) for the full API.
+</Tip>
+
 ---
 
 ## Using `fetch`

@@ -77,6 +77,13 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 ```typescript SDK
 const result = await notra.content.listPosts();
 ```
+
+```rust Rust
+let result = notra.content()
+    .list_posts()
+    .send()
+    .await?;
+```
 </CodeGroup>
 
 </Tab>
@@ -94,6 +101,14 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 const result = await notra.content.listPosts({
   limit: 5,
 });
+```
+
+```rust Rust
+let result = notra.content()
+    .list_posts()
+    .limit(5)
+    .send()
+    .await?;
 ```
 </CodeGroup>
 
@@ -113,6 +128,15 @@ const result = await notra.content.listPosts({
   page: 2,
   limit: 5,
 });
+```
+
+```rust Rust
+let result = notra.content()
+    .list_posts()
+    .page(2)
+    .limit(5)
+    .send()
+    .await?;
 ```
 </CodeGroup>
 
@@ -157,6 +181,29 @@ const canGoBack = pagination.previousPage !== null;
 const canGoForward = pagination.nextPage !== null;
 const pageInfo = `Page ${pagination.currentPage} of ${pagination.totalPages}`;
 const itemCount = `${pagination.totalItems} total items`;
+```
+
+```rust Rust
+let result = notra.content()
+    .list_posts()
+    .page(1)
+    .limit(10)
+    .send()
+    .await?;
+
+let pagination = &result.pagination;
+
+let can_go_back = pagination.previous_page.is_some();
+let can_go_forward = pagination.next_page.is_some();
+let page_info = format!(
+    "Page {} of {}",
+    pagination.current_page,
+    pagination.total_pages.unwrap_or(1)
+);
+let item_count = format!(
+    "{} total items",
+    pagination.total_posts.unwrap_or(0)
+);
 ```
 </CodeGroup>
 
